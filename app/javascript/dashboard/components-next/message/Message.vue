@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, computed, ref, toRefs } from 'vue';
+import { onMounted, computed, ref, toRefs, inject } from 'vue';
 import { useTimeoutFn } from '@vueuse/core';
 import { provideMessageContext } from './provider.js';
 import { useTrack } from 'dashboard/composables';
@@ -355,6 +355,14 @@ const isMessageDeleted = computed(() => {
   return props.contentAttributes?.deleted;
 });
 
+const messageSelection = inject('messageSelection', null);
+const isSelectable = computed(() => !!messageSelection);
+const isSelected = computed(() => messageSelection?.isSelected?.(props.id) ?? false);
+const shouldShowSelectionControl = computed(() => {
+  if (!isSelectable.value) return false;
+  return messageSelection?.hasSelection?.() || isSelected.value;
+});
+
 const payloadForContextMenu = computed(() => {
   return {
     id: props.id,
@@ -431,6 +439,10 @@ function openContextMenu(e) {
 function closeContextMenu() {
   showContextMenu.value = false;
   contextMenuPosition.value = { x: null, y: null };
+}
+
+function toggleSelected() {
+  messageSelection?.toggle?.(props.id);
 }
 
 function handleReplyTo() {
@@ -518,7 +530,7 @@ provideMessageContext({
   <div
     v-if="shouldRenderMessage"
     :id="`message${props.id}`"
-    class="flex w-full mb-2 message-bubble-container"
+    class="flex w-full mb-2 message-bubble-container group/message"
     :data-message-id="props.id"
     :class="[
       flexOrientationClass,
@@ -528,6 +540,28 @@ provideMessageContext({
       },
     ]"
   >
+    <div v-if="isSelectable" class="flex items-start">
+      <button
+        type="button"
+        class="mr-2 mt-2 size-5 flex items-center justify-center rounded border border-n-strong bg-n-surface-1 text-n-slate-12 transition-opacity"
+        :class="[
+          shouldShowSelectionControl ? 'opacity-100' : 'opacity-0 group-hover/message:opacity-100',
+          isSelected ? 'ring-2 ring-n-brand' : '',
+        ]"
+        :aria-pressed="isSelected"
+        :aria-label="$t('CONVERSATION.FORWARD.TOGGLE_SELECT_MESSAGE')"
+        @click.stop="toggleSelected"
+        @contextmenu.stop.prevent
+      >
+        <input
+          class="size-4"
+          type="checkbox"
+          :checked="isSelected"
+          tabindex="-1"
+          aria-hidden="true"
+        />
+      </button>
+    </div>
     <div v-if="variant === MESSAGE_VARIANTS.ACTIVITY">
       <ActivityBubble :content="content" />
     </div>
