@@ -249,18 +249,6 @@ const downloadAttachmentsAsFiles = async attachments => {
   return files;
 };
 
-/**
- * Removes forwarded message prefixes of the form:
- * "+52 18111306066 - Arturo Ledezma:\n" or "Nombre:\n"
- * leaving only the actual message text.
- */
-const stripForwardedPrefix = text => {
-  if (!text) return text;
-  // Matches optional phone number + dash + name + colon at the start of the string
-  // e.g. "+52 18111306066 - Arturo Ledezma:" or just "Arturo Ledezma:"
-  return text.replace(/^[\d\s+\-()]+[-–]\s*.+?:\s*\n?/m, '').trim();
-};
-
 const forwardSelectedMessages = async destinationConversationId => {
   const destinationId = Number(destinationConversationId);
   if (!destinationId || selectedMessageIds.size === 0) return;
@@ -280,7 +268,7 @@ const forwardSelectedMessages = async destinationConversationId => {
       const files = await downloadAttachmentsAsFiles(message.attachments);
       await MessageApi.create({
         conversationId: destinationId,
-        message: stripForwardedPrefix(message.content),
+        message: message.content,
         private: message.private,
         contentAttributes: {},
         files,
