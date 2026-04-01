@@ -409,3 +409,5 @@ const shouldShowDayDivider = (messages, index) => {
     </ul>
   </div>
 </template>
+  </div>
+</template>
