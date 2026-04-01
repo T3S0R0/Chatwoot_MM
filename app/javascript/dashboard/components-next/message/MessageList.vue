@@ -238,27 +238,40 @@ const downloadAttachmentsAsFiles = async attachments => {
     const url = attachment?.dataUrl || attachment?.data_url;
     if (!url) continue;
 
-    const response = await fetch(url, { credentials: 'include' });
-    const blob = await response.blob();
-    const filename = inferFilename(attachment, response);
-    const file = new File([blob], filename, {
-      type: blob.type || response.headers.get('content-type') || '',
-    });
-    files.push(file);
+    try {
+      // Primer intento: fetch con credenciales de sesión (para URLs locales del servidor)
+      let response = await fetch(url, { credentials: 'include' });
+
+      // Si la respuesta no es OK o fue redirigida (ej. redirect a S3),
+      // hacer un segundo fetch sin credentials a la URL final
+      if (!response.ok || response.redirected) {
+        const finalUrl = response.url || url;
+        response = await fetch(finalUrl);
+      }
+
+      if (!response.ok) {
+        console.error('Error descargando attachment, status:', response.status, url);
+        continue;
+      }
+
+      const blob = await response.blob();
+
+      // Ignorar blobs vacíos
+      if (!blob || blob.size === 0) {
+        console.error('Blob vacío para attachment:', url);
+        continue;
+      }
+
+      const filename = inferFilename(attachment, response);
+      const file = new File([blob], filename, {
+        type: blob.type || response.headers.get('content-type') || '',
+      });
+      files.push(file);
+    } catch (e) {
+      console.error('Error descargando attachment:', url, e);
+    }
   }
   return files;
-};
-
-/**
- * Removes forwarded message prefixes of the form:
- * "+52 18111306066 - Arturo Ledezma:\n" or "Nombre:\n"
- * leaving only the actual message text.
- */
-const stripForwardedPrefix = text => {
-  if (!text) return text;
-  // Matches optional phone number + dash + name + colon at the start of the string
-  // e.g. "+52 18111306066 - Arturo Ledezma:" or just "Arturo Ledezma:"
-  return text.replace(/^[\d\s+\-()]+[-–]\s*.+?:\s*\n?/m, '').trim();
 };
 
 const forwardSelectedMessages = async destinationConversationId => {
@@ -280,7 +293,7 @@ const forwardSelectedMessages = async destinationConversationId => {
       const files = await downloadAttachmentsAsFiles(message.attachments);
       await MessageApi.create({
         conversationId: destinationId,
-        message: stripForwardedPrefix(message.content),
+        message: message.content,
         private: message.private,
         contentAttributes: {},
         files,
