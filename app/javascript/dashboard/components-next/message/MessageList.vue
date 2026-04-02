@@ -10,37 +10,12 @@ import NextButton from 'dashboard/components-next/button/Button.vue';
 import ForwardMessagesModal from './ForwardMessagesModal.vue';
 import { useAlert } from 'dashboard/composables';
 
-/**
- * Props definition for the component
- * @typedef {Object} Props
- * @property {Array} readMessages - Array of read messages
- * @property {Array} unReadMessages - Array of unread messages
- * @property {Number} currentUserId - ID of the current user
- * @property {Boolean} isAnEmailChannel - Whether this is an email channel
- * @property {Object} inboxSupportsReplyTo - Inbox reply support configuration
- * @property {Array} messages - Array of all messages [These are not in camelcase]
- */
 const props = defineProps({
-  currentUserId: {
-    type: Number,
-    required: true,
-  },
-  firstUnreadId: {
-    type: Number,
-    default: null,
-  },
-  isAnEmailChannel: {
-    type: Boolean,
-    default: false,
-  },
-  inboxSupportsReplyTo: {
-    type: Object,
-    default: () => ({ incoming: false, outgoing: false }),
-  },
-  messages: {
-    type: Array,
-    default: () => [],
-  },
+  currentUserId: { type: Number, required: true },
+  firstUnreadId: { type: Number, default: null },
+  isAnEmailChannel: { type: Boolean, default: false },
+  inboxSupportsReplyTo: { type: Object, default: () => ({ incoming: false, outgoing: false }) },
+  messages: { type: Array, default: () => [] },
 });
 
 const emit = defineEmits(['retry']);
@@ -77,38 +52,25 @@ provide('messageSelection', {
   hasSelection: () => selectedMessageIds.size > 0,
 });
 
-// Cache for fetched reply messages to avoid duplicate API calls
 const fetchedReplyMessages = reactive(new Map());
 
-/**
- * Fetches a specific message from the API by trying to get messages around it
- * @param {number} messageId - The ID of the message to fetch
- * @param {number} conversationId - The ID of the conversation
- * @returns {Promise<Object|null>} - The fetched message or null if not found/error
- */
 const fetchReplyMessage = async (messageId, conversationId) => {
-  // Return cached result if already fetched
   if (fetchedReplyMessages.has(messageId)) {
     return fetchedReplyMessages.get(messageId);
   }
-
   try {
     const response = await MessageApi.getPreviousMessages({
       conversationId,
       before: messageId + 100,
       after: messageId - 100,
     });
-
     const messages = response.data?.payload || [];
     const targetMessage = messages.find(msg => msg.id === messageId);
-
     if (targetMessage) {
       const camelCaseMessage = useCamelCase(targetMessage);
       fetchedReplyMessages.set(messageId, camelCaseMessage);
       return camelCaseMessage;
     }
-
-    // Cache null result to avoid repeated API calls
     fetchedReplyMessages.set(messageId, null);
     return null;
   } catch (error) {
@@ -117,74 +79,41 @@ const fetchReplyMessage = async (messageId, conversationId) => {
   }
 };
 
-/**
- * Determines if a message should be grouped with the next message
- * @param {Number} index - Index of the current message
- * @param {Array} searchList - Array of messages to check
- * @returns {Boolean} - Whether the message should be grouped with next
- */
 const shouldGroupWithNext = (index, searchList) => {
   if (index === searchList.length - 1) return false;
-
   const current = searchList[index];
   const next = searchList[index + 1];
-
   if (next.status === 'failed') return false;
-
   const nextSenderId = next.senderId ?? next.sender?.id;
   const currentSenderId = current.senderId ?? current.sender?.id;
   const hasSameSender = nextSenderId === currentSenderId;
-
   const nextMessageType = next.messageType;
   const currentMessageType = current.messageType;
-
   const areBothTemplates =
     nextMessageType === MESSAGE_TYPES.TEMPLATE &&
     currentMessageType === MESSAGE_TYPES.TEMPLATE;
-
   if (!hasSameSender || areBothTemplates) return false;
-
   if (currentMessageType !== nextMessageType) return false;
-
-  // Check if messages are in the same minute by rounding down to nearest minute
   return Math.floor(next.createdAt / 60) === Math.floor(current.createdAt / 60);
 };
 
-/**
- * Gets the message that was replied to
- * @param {Object} parentMessage - The message containing the reply reference
- * @returns {Object|null} - The message being replied to, or null if not found
- */
 const getInReplyToMessage = parentMessage => {
   if (!parentMessage) return null;
-
   const inReplyToMessageId =
     parentMessage.contentAttributes?.inReplyTo ??
     parentMessage.content_attributes?.in_reply_to;
-
   if (!inReplyToMessageId) return null;
-
-  // Try to find in current messages first
   let replyMessage = props.messages?.find(msg => msg.id === inReplyToMessageId);
-
-  // Then try store messages
   if (!replyMessage && currentChat.value?.messages) {
-    replyMessage = currentChat.value.messages.find(
-      msg => msg.id === inReplyToMessageId
-    );
+    replyMessage = currentChat.value.messages.find(msg => msg.id === inReplyToMessageId);
   }
-
-  // Then check fetch cache
   if (!replyMessage && fetchedReplyMessages.has(inReplyToMessageId)) {
     replyMessage = fetchedReplyMessages.get(inReplyToMessageId);
   }
-
-  // If still not found and we have conversation context, fetch it
   if (!replyMessage && currentChat.value?.id) {
     fetchReplyMessage(inReplyToMessageId, currentChat.value.id);
-    return null; // Let UI handle loading state
+    return null;
   }
-
   return replyMessage ? useCamelCase(replyMessage) : null;
 };
 
@@ -212,7 +141,6 @@ const contentTypeToExtension = contentType => {
 const inferFilename = (attachment, response) => {
   const byExtension = attachment?.extension ? `attachment-${attachment.id}.${attachment.extension}` : '';
   if (byExtension) return byExtension;
-
   const url = attachment?.dataUrl || attachment?.data_url;
   if (url) {
     try {
@@ -223,7 +151,6 @@ const inferFilename = (attachment, response) => {
       // ignore
     }
   }
-
   const contentType = response?.headers?.get?.('content-type') || '';
   const ext = contentTypeToExtension(contentType);
   return ext ? `attachment-${attachment?.id}.${ext}` : `attachment-${attachment?.id}`;
@@ -239,14 +166,12 @@ const downloadAttachmentsAsFiles = async attachments => {
     if (!url) continue;
 
     try {
-      // Primer intento: fetch con credenciales de sesión (para URLs locales del servidor)
-      let response = await fetch(url, { credentials: 'include' });
+      // Primer intento: sin credentials (funciona con S3 público y URLs directas)
+      let response = await fetch(url);
 
-      // Si la respuesta no es OK o fue redirigida (ej. redirect a S3),
-      // hacer un segundo fetch sin credentials a la URL final
-      if (!response.ok || response.redirected) {
-        const finalUrl = response.url || url;
-        response = await fetch(finalUrl);
+      // Si falla, intentar con credentials de sesión (para URLs locales del servidor)
+      if (!response.ok) {
+        response = await fetch(url, { credentials: 'include' });
       }
 
       if (!response.ok) {
@@ -256,7 +181,6 @@ const downloadAttachmentsAsFiles = async attachments => {
 
       const blob = await response.blob();
 
-      // Ignorar blobs vacíos
       if (!blob || blob.size === 0) {
         console.error('Blob vacío para attachment:', url);
         continue;
