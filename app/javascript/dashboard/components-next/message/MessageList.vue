@@ -80,41 +80,53 @@ provide('messageSelection', {
 // Cache for fetched reply messages to avoid duplicate API calls
 const fetchedReplyMessages = reactive(new Map());
 
+// In-flight request map: prevents launching multiple requests for the same
+// messageId while the first one is still pending. Once the request settles,
+// its entry is removed so the result cache takes over.
+const inFlightRequests = new Map();
+
 /**
- * Fetches a specific message from the API by trying to get messages around it
+ * Fetches a specific message from the API by trying to get messages around it.
+ * Requests for the same messageId are deduplicated: if a fetch is already in
+ * progress, the same Promise is returned instead of launching a new request.
  * @param {number} messageId - The ID of the message to fetch
  * @param {number} conversationId - The ID of the conversation
  * @returns {Promise<Object|null>} - The fetched message or null if not found/error
  */
-const fetchReplyMessage = async (messageId, conversationId) => {
+const fetchReplyMessage = (messageId, conversationId) => {
   // Return cached result if already fetched
   if (fetchedReplyMessages.has(messageId)) {
-    return fetchedReplyMessages.get(messageId);
+    return Promise.resolve(fetchedReplyMessages.get(messageId));
   }
 
-  try {
-    const response = await MessageApi.getPreviousMessages({
-      conversationId,
-      before: messageId + 100,
-      after: messageId - 100,
+  // Return the existing in-flight promise if a request is already pending
+  if (inFlightRequests.has(messageId)) {
+    return inFlightRequests.get(messageId);
+  }
+
+  const request = MessageApi.getPreviousMessages({
+    conversationId,
+    before: messageId + 1,
+    after: messageId - 1,
+  })
+    .then(response => {
+      const messages = response.data?.payload || [];
+      const targetMessage = messages.find(msg => msg.id === messageId);
+      const result = targetMessage ? useCamelCase(targetMessage) : null;
+      fetchedReplyMessages.set(messageId, result);
+      return result;
+    })
+    .catch(() => {
+      // Cache null so we don't retry on every scroll event
+      fetchedReplyMessages.set(messageId, null);
+      return null;
+    })
+    .finally(() => {
+      inFlightRequests.delete(messageId);
     });
 
-    const messages = response.data?.payload || [];
-    const targetMessage = messages.find(msg => msg.id === messageId);
-
-    if (targetMessage) {
-      const camelCaseMessage = useCamelCase(targetMessage);
-      fetchedReplyMessages.set(messageId, camelCaseMessage);
-      return camelCaseMessage;
-    }
-
-    // Cache null result to avoid repeated API calls
-    fetchedReplyMessages.set(messageId, null);
-    return null;
-  } catch (error) {
-    fetchedReplyMessages.set(messageId, null);
-    return null;
-  }
+  inFlightRequests.set(messageId, request);
+  return request;
 };
 
 /**
@@ -229,54 +241,22 @@ const inferFilename = (attachment, response) => {
   return ext ? `attachment-${attachment?.id}.${ext}` : `attachment-${attachment?.id}`;
 };
 
-/**
- * Converts an Active Storage redirect URL to a proxy URL so Rails serves
- * the file directly instead of redirecting the browser to S3.
- * This avoids CORS errors because the request never leaves our own origin.
- *
- * /rails/active_storage/blobs/redirect/<signed_id>/filename
- *   → /rails/active_storage/blobs/proxy/<signed_id>/filename
- *
- * If the URL is already a proxy URL or is an external URL (e.g. a direct
- * S3 URL without an Active Storage path), it is returned unchanged.
- */
-const toProxyUrl = rawUrl => {
-  if (!rawUrl) return rawUrl;
-  try {
-    const url = new URL(rawUrl, window.location.origin);
-    // Only rewrite same-origin Active Storage redirect URLs
-    if (url.origin !== window.location.origin) return rawUrl;
-    return url.pathname.includes('/blobs/redirect/')
-      ? rawUrl.replace('/blobs/redirect/', '/blobs/proxy/')
-      : rawUrl;
-  } catch {
-    return rawUrl;
-  }
-};
-
 const downloadAttachmentsAsFiles = async attachments => {
   const items = Array.isArray(attachments) ? attachments : [];
   if (items.length === 0) return [];
 
   const files = [];
   for (const attachment of items) {
-    const rawUrl = attachment?.dataUrl || attachment?.data_url;
-    if (!rawUrl) continue;
+    const url = attachment?.dataUrl || attachment?.data_url;
+    if (!url) continue;
 
-    try {
-      // Use proxy URL so Rails streams the file — no S3 redirect, no CORS
-      const url = toProxyUrl(rawUrl);
-      const response = await fetch(url, { credentials: 'same-origin' });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const blob = await response.blob();
-      const filename = inferFilename(attachment, response);
-      files.push(new File([blob], filename, {
-        type: blob.type || response.headers.get('content-type') || '',
-      }));
-    } catch (err) {
-      console.warn('[ForwardMessage] Could not download attachment:', rawUrl, err);
-      // Skip this attachment rather than failing the entire forward
-    }
+    const response = await fetch(url, { credentials: 'include' });
+    const blob = await response.blob();
+    const filename = inferFilename(attachment, response);
+    const file = new File([blob], filename, {
+      type: blob.type || response.headers.get('content-type') || '',
+    });
+    files.push(file);
   }
   return files;
 };
