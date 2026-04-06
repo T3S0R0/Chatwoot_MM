@@ -30,9 +30,15 @@ const isReel = computed(() => {
   <BaseBubble
     class="overflow-hidden p-3"
     data-bubble-name="video"
-    @click="showGallery = true"
+    @click="!hasError && (showGallery = true)"
   >
-    <div class="relative group rounded-lg overflow-hidden">
+    <div v-if="hasError" class="flex items-center gap-1 text-center rounded-lg">
+      <Icon icon="i-lucide-circle-off" class="text-n-slate-11" />
+      <p class="mb-0 text-n-slate-11">
+        {{ $t('COMPONENTS.MEDIA.IMAGE_UNAVAILABLE') }}
+      </p>
+    </div>
+    <div v-else class="relative group rounded-lg overflow-hidden">
       <div
         v-if="isReel"
         class="absolute p-2 flex items-start justify-end right-0 pointer-events-none"
