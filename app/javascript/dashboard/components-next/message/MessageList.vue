@@ -229,16 +229,67 @@ const inferFilename = (attachment, response) => {
   return ext ? `attachment-${attachment?.id}.${ext}` : `attachment-${attachment?.id}`;
 };
 
-const downloadAttachmentsAsFiles = async attachments => {
+/**
+ * Attempts to fetch an attachment URL. If it fails (e.g. expired S3 signed URL),
+ * fetches a fresh copy of the message from the API and retries once with the
+ * updated URL. This avoids CORS/ERR_FAILED errors on old messages without
+ * adding extra requests in the happy path.
+ */
+const fetchAttachmentWithRetry = async (attachment, conversationId) => {
+  const tryFetch = async url => {
+    // S3 signed URLs must not receive browser credentials — remove 'include'
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response;
+  };
+
+  const originalUrl = attachment?.dataUrl || attachment?.data_url;
+  if (!originalUrl) return null;
+
+  try {
+    // Happy path: URL is still valid
+    return await tryFetch(originalUrl);
+  } catch {
+    // URL expired or CORS blocked — try to get a fresh URL from the API
+    try {
+      const apiResponse = await MessageApi.getPreviousMessages({
+        conversationId,
+        before: attachment.messageId + 2,
+        after: attachment.messageId - 2,
+      });
+      const messages = apiResponse.data?.payload || [];
+      const freshMessage = messages.find(m => m.id === attachment.messageId);
+      const freshAttachment = freshMessage?.attachments?.find(
+        a => a.id === attachment.id
+      );
+      const freshUrl =
+        freshAttachment?.data_url || freshAttachment?.dataUrl || originalUrl;
+
+      if (freshUrl !== originalUrl) {
+        return await tryFetch(freshUrl);
+      }
+    } catch {
+      // API call failed — nothing more we can do
+    }
+    return null;
+  }
+};
+
+const downloadAttachmentsAsFiles = async (attachments, messageId, conversationId) => {
   const items = Array.isArray(attachments) ? attachments : [];
   if (items.length === 0) return [];
 
   const files = [];
   for (const attachment of items) {
-    const url = attachment?.dataUrl || attachment?.data_url;
-    if (!url) continue;
+    // Attach messageId so the retry helper can look it up in the API
+    const attachmentWithMsgId = { ...attachment, messageId };
 
-    const response = await fetch(url, { credentials: 'include' });
+    const response = await fetchAttachmentWithRetry(
+      attachmentWithMsgId,
+      conversationId
+    );
+    if (!response) continue; // skip silently if both attempts failed
+
     const blob = await response.blob();
     const filename = inferFilename(attachment, response);
     const file = new File([blob], filename, {
@@ -247,18 +298,6 @@ const downloadAttachmentsAsFiles = async attachments => {
     files.push(file);
   }
   return files;
-};
-
-/**
- * Removes forwarded message prefixes of the form:
- * "+52 18111306066 - Arturo Ledezma:\n" or "Nombre:\n"
- * leaving only the actual message text.
- */
-const stripForwardedPrefix = text => {
-  if (!text) return text;
-  // Matches optional phone number + dash + name + colon at the start of the string
-  // e.g. "+52 18111306066 - Arturo Ledezma:" or just "Arturo Ledezma:"
-  return text.replace(/^[\d\s+\-()]+[-–]\s*.+?:\s*\n?/m, '').trim();
 };
 
 const forwardSelectedMessages = async destinationConversationId => {
@@ -277,10 +316,14 @@ const forwardSelectedMessages = async destinationConversationId => {
 
     let successCount = 0;
     for (const message of selectedMessages) {
-      const files = await downloadAttachmentsAsFiles(message.attachments);
+      const files = await downloadAttachmentsAsFiles(
+        message.attachments,
+        message.id,
+        currentChat.value?.id  // conversación origen, donde vive el attachment
+      );
       await MessageApi.create({
         conversationId: destinationId,
-        message: stripForwardedPrefix(message.content),
+        message: message.content,
         private: message.private,
         contentAttributes: {},
         files,
