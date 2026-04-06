@@ -230,72 +230,53 @@ const inferFilename = (attachment, response) => {
 };
 
 /**
- * Attempts to fetch an attachment URL. If it fails (e.g. expired S3 signed URL),
- * fetches a fresh copy of the message from the API and retries once with the
- * updated URL. This avoids CORS/ERR_FAILED errors on old messages without
- * adding extra requests in the happy path.
+ * Converts an Active Storage redirect URL to a proxy URL so Rails serves
+ * the file directly instead of redirecting the browser to S3.
+ * This avoids CORS errors because the request never leaves our own origin.
+ *
+ * /rails/active_storage/blobs/redirect/<signed_id>/filename
+ *   → /rails/active_storage/blobs/proxy/<signed_id>/filename
+ *
+ * If the URL is already a proxy URL or is an external URL (e.g. a direct
+ * S3 URL without an Active Storage path), it is returned unchanged.
  */
-const fetchAttachmentWithRetry = async (attachment, conversationId) => {
-  const tryFetch = async url => {
-    // S3 signed URLs must not receive browser credentials — remove 'include'
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return response;
-  };
-
-  const originalUrl = attachment?.dataUrl || attachment?.data_url;
-  if (!originalUrl) return null;
-
+const toProxyUrl = rawUrl => {
+  if (!rawUrl) return rawUrl;
   try {
-    // Happy path: URL is still valid
-    return await tryFetch(originalUrl);
+    const url = new URL(rawUrl, window.location.origin);
+    // Only rewrite same-origin Active Storage redirect URLs
+    if (url.origin !== window.location.origin) return rawUrl;
+    return url.pathname.includes('/blobs/redirect/')
+      ? rawUrl.replace('/blobs/redirect/', '/blobs/proxy/')
+      : rawUrl;
   } catch {
-    // URL expired or CORS blocked — try to get a fresh URL from the API
-    try {
-      const apiResponse = await MessageApi.getPreviousMessages({
-        conversationId,
-        before: attachment.messageId + 2,
-        after: attachment.messageId - 2,
-      });
-      const messages = apiResponse.data?.payload || [];
-      const freshMessage = messages.find(m => m.id === attachment.messageId);
-      const freshAttachment = freshMessage?.attachments?.find(
-        a => a.id === attachment.id
-      );
-      const freshUrl =
-        freshAttachment?.data_url || freshAttachment?.dataUrl || originalUrl;
-
-      if (freshUrl !== originalUrl) {
-        return await tryFetch(freshUrl);
-      }
-    } catch {
-      // API call failed — nothing more we can do
-    }
-    return null;
+    return rawUrl;
   }
 };
 
-const downloadAttachmentsAsFiles = async (attachments, messageId, conversationId) => {
+const downloadAttachmentsAsFiles = async attachments => {
   const items = Array.isArray(attachments) ? attachments : [];
   if (items.length === 0) return [];
 
   const files = [];
   for (const attachment of items) {
-    // Attach messageId so the retry helper can look it up in the API
-    const attachmentWithMsgId = { ...attachment, messageId };
+    const rawUrl = attachment?.dataUrl || attachment?.data_url;
+    if (!rawUrl) continue;
 
-    const response = await fetchAttachmentWithRetry(
-      attachmentWithMsgId,
-      conversationId
-    );
-    if (!response) continue; // skip silently if both attempts failed
-
-    const blob = await response.blob();
-    const filename = inferFilename(attachment, response);
-    const file = new File([blob], filename, {
-      type: blob.type || response.headers.get('content-type') || '',
-    });
-    files.push(file);
+    try {
+      // Use proxy URL so Rails streams the file — no S3 redirect, no CORS
+      const url = toProxyUrl(rawUrl);
+      const response = await fetch(url, { credentials: 'same-origin' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const blob = await response.blob();
+      const filename = inferFilename(attachment, response);
+      files.push(new File([blob], filename, {
+        type: blob.type || response.headers.get('content-type') || '',
+      }));
+    } catch (err) {
+      console.warn('[ForwardMessage] Could not download attachment:', rawUrl, err);
+      // Skip this attachment rather than failing the entire forward
+    }
   }
   return files;
 };
@@ -316,11 +297,7 @@ const forwardSelectedMessages = async destinationConversationId => {
 
     let successCount = 0;
     for (const message of selectedMessages) {
-      const files = await downloadAttachmentsAsFiles(
-        message.attachments,
-        message.id,
-        currentChat.value?.id  // conversación origen, donde vive el attachment
-      );
+      const files = await downloadAttachmentsAsFiles(message.attachments);
       await MessageApi.create({
         conversationId: destinationId,
         message: message.content,
