@@ -147,6 +147,8 @@ COPY --from=pre-builder /app /app
 # Copy .git_sha file from pre-builder stage
 COPY --from=pre-builder /app/.git_sha /app/.git_sha
 
+RUN sed -i "/config.active_storage.service/a\\  Rails.application.config.active_storage.resolve_model_to_route = :rails_storage_proxy" /app/config/environments/production.rb
+
 WORKDIR /app
 
 EXPOSE 3000
